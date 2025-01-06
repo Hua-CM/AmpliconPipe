@@ -1,0 +1,541 @@
+---
+title: "16S_Downstream_Pipeline"
+author: "Zhongyi Hua"
+date: "2024-12-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Global settings
+
+```{r set_data}
+table_sam_path <- "G:\\Developing\\p-cresol\\Data\\MetaData\\sample.meta.tsv"
+table_tax_path <- "G:\\Developing\\p-cresol\\Data\\RawData\\asv.sintax"
+table_otu_path <- "G:\\Developing\\p-cresol\\Data\\RawData\\asvtab.tsv"
+tree_path <- "G:\\Developing\\p-cresol\\Data\\RawData\\tree.root.nwk"
+output_dir_path <- "G:\\temp\\demo16S"
+
+# Analysis settings
+group1 = "group"
+# #The order of the group to show
+order1 = c('CK', 'Soil', 'GE', 'P', 'PGE')
+color1 =  color_scheme("Plan2")
+```
+
+```{r load_pkgs}
+#devtools::install_github("ChiLiubio/microeco")
+#devtools::install_github("ChiLiubio/mecodev")
+library(microeco)
+library(mecodev)
+library(ape)
+requireNamespace("FSA", quietly = TRUE) # 
+requireNamespace("rcompanion", quietly = TRUE) # Kw_dunn test
+requireNamespace('GUniFrac', quietly = TRUE) # For UniFrac
+if(!requireNamespace("WGCNA")) install.packages("WGCNA", repos = BiocManager::repositories()) # Network calculation
+if(!requireNamespace("igraph")) install.packages("igraph")
+
+
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(magrittr)
+
+library(ggplot2)
+library(ggh4x) # For Two-group visulization
+library(paletteer) #For more colors
+library(patchwork)
+
+theme_publication <- function(base_size=8) {
+  (theme(plot.title = element_text(face = "bold",
+                                   size = rel(1.2), hjust = 0.5),
+         panel.background = element_rect(fill="white", colour = NA),
+         axis.title = element_text(face = "bold", size = 10),
+         axis.title.y = element_text(angle=90,vjust =2),
+         axis.title.x = element_text(vjust = -0.2),
+         axis.text = element_text(size = base_size), 
+         axis.line = element_line(colour="black"),
+         axis.ticks = element_line(),
+         panel.grid.major.y = element_line(colour="#f0f0f0"),
+         panel.grid.major.x = element_blank(),
+         panel.grid.minor = element_blank(),
+         legend.text = element_text(size = 8),
+         legend.key = element_rect(colour = NA),
+         #legend.position = "bottom",
+         legend.direction = "horizontal",
+         legend.key.size= unit(0.2, "cm"),
+         legend.background = element_blank(),
+         plot.margin=unit(c(10,5,5,5),"mm"),
+         strip.background=element_rect(colour="#f0f0f0",fill="#f0f0f0"),
+         strip.text = element_text(face="bold"))
+  )
+}
+
+color_scheme=function(Plan,expand=NULL,names=NULL,show=TRUE){
+  if(inherits(Plan, "character") && length(Plan) == 1){
+    if(Plan=="Plan1"){
+      color_Plan=c("#E69F00","#56B4E9")
+    }else if(Plan=="Plan2"){
+      color_Plan=c("#FE5D5D","#71C9DD","#33B39F","#6376A0","#F5AF98")
+    }else if(Plan=="Plan3"){
+      color_Plan=c("#4070AF", "#8CA5BB", "#D8DDC7","#FCD39B", "#F18159", "#D42C24")
+    }else if(Plan=="Plan4"){
+      color_Plan=c("#35A585","#EAE48E","#006FB0","#CC78A6","#F2C661","#56B4E9")
+    }else if(Plan=="Plan5"){
+      color_Plan=c("#f49128","#194a55","#187c65","#f26115","#c29f62","#83ba9e")
+    }else if(Plan=="Plan6"){
+      color_Plan=c("#c62d17","#023f75","#ea894e","#266b69","#eb4601","#f6c619")
+    }else if(Plan=="Plan7"){
+      color_Plan=c("#BC3C29FF","#0072B5FF","#E18727FF","#20854EFF","#7876B1FF",
+                   "#6F99ADFF","#FFDC91FF","#EE4C97FF")
+    }else if(Plan=="Plan8"){
+      color_Plan=c("#E64B35FF","#4DBBD5FF","#00A087FF", "#3C5488FF", "#F39B7FFF",
+                   "#8491B4FF", "#91D1C2FF", "#DC0000FF", "#7E6148FF","#B09C85FF")
+    }else if(Plan=="Plan9"){
+      color_Plan=c("#6a73cf","#edd064","#0eb0c8","#f2ccac","#a1d5b9","#e1abbc",
+                   "#fa6e01","#2f2f2f","#972b1d","#e6a84b","#4c211b","#ff717f")
+    }else if(Plan=="Plan10"){
+      color_Plan=c("#A6CEE3","#1F78B4","#B2DF8A","#33A02C", "#FB9A99","#E31A1C",
+                   "#FDBF6F","#FF7F00","#CAB2D6","#6A3D9A", "#FFFF99","#B15928")
+    }else{warning("Please choose correct Plan! ('Plan1' to 'Plan9')")}
+  }else{
+    color_Plan=Plan
+  }
+  if(!is.null(expand)){
+    assign_col=colorRampPalette(color_Plan)(expand)
+  }else{
+    assign_col=color_Plan
+  }
+  if(length(names)>length(assign_col)){
+    assign_col=colorRampPalette(color_Plan)(length(names))
+  }
+  names(assign_col)=names
+  if(isTRUE(show)){
+    show_col(assign_col)
+    message("Color scheme generated, see in your plot interface")
+  }
+  return(assign_col)
+}
+```
+
+
+```{r load_data}
+# table
+table_sample <- read.delim(table_sam_path, row.names=1)
+if (exists("order1")){
+  table_sample[[group1]] <- factor(table_sample[[group1]], levels = order1)
+}
+# abundance
+table_otu <- read.delim(table_otu_path, row.names=1)
+
+# Taxonomy
+# #For sintax table
+table_tax <- read.delim(table_tax_path, header = F) %>%
+  separate(V4,
+           sep=',', 
+           into=c('Kingdom', 'Phylum', 'Class', 'Order', 'Family', 'Genus', 'Species')
+  ) %>%
+  `rownames<-`(.$V1) %>%
+  select(-c(V1, V2, V3)) %>%
+  mutate(across(everything(), \(x){str_replace(x, '.*:', '')}))
+
+# Tree
+tree_otu <- ape::read.tree(tree_path)
+
+# Create obj
+microtable_obj <- microtable$new(sample_table = table_sample,
+                                 tax_table = table_tax,
+                                 otu_table = table_otu,
+                                 phylo_tree=tree_otu)
+microtable_obj_raw <- clone(microtable_obj)
+
+# Output
+if (!dir.exists(output_dir_path)) {
+  dir.create(output_dir_path, recursive = TRUE)
+}
+```
+
+## Rarefy results
+
+```{r rarefication, echo=FALSE}
+# Output path
+output_path1 <- file.path(output_dir_path, "01_rarefication")
+if (!dir.exists(output_path1)){
+  dir.create(output_path1)
+}
+
+#sample.size <- 
+microtable_obj$rarefy_samples()
+# Total reads after 
+depth_vec <- c(0, 10, 50, 500, 2000, 5000, 10000,
+               seq(10000, sum(microtable_obj$otu_table[1]), 5000))
+obj_rarefy <- trans_rarefy$new(microtable_obj, alphadiv = "Observed",
+                       depth = depth_vec)
+plot_rarefy <- obj_rarefy$plot_rarefy(color = group1, show_point = FALSE, add_fitting = TRUE)
+if (exists("color1")){
+  plot_rarefy <- plot_rarefy + scale_color_manual(values = color1)
+}
+
+# Output
+ggsave(file.path(output_path1, 'rarefication.pdf'),
+       plot_rarefy,
+       width = 180,
+       height = 120,
+       units = 'mm')
+write.table(data.frame(OTU=row.names(microtable_obj$otu_table),microtable_obj$otu_table),
+            file.path(output_path1, 'rarefied_otu_table.tsv'),
+            quote = FALSE, sep = '\t', row.names = FALSE)
+```
+
+## Alpha diversity
+```{r alpha_div}
+output_path2 <- file.path(output_dir_path, "02_Alpha")
+if (!dir.exists(output_path2)){
+  dir.create(output_path2)
+}
+
+indices_alpha <- c("Observed", "Shannon", "Pielou")
+obj_alpha <- trans_alpha$new(microtable_obj, group = group1)
+
+# Kruskal-Wallis test with Dunn post-hoc test
+obj_alpha$cal_diff(method = "KW_dunn")
+
+# Visualization
+plot_alpha_lst <- list()
+for (indice in indices_alpha){
+  plot_alpha_lst[[indice]] <- obj_alpha$plot_alpha(measure = indice,
+                                                   add_sig_text_size = 6,
+                                                   add = "jitter")
+  if (exists("color1")){
+    plot_alpha_lst[[indice]] <- plot_alpha_lst[[indice]] + scale_color_manual(values = color1)
+  }
+
+  ggsave(file.path(output_path2, paste0(indice, '.pdf')),
+         plot_alpha_lst[[indice]],
+         width = 180,
+         height = 120,
+         units = 'mm')
+}
+
+# Write table
+obj_alpha$data_alpha %>%
+  filter(Measure %in% indices_alpha) %>%
+  write.table(file.path(output_path2, 'alpha_result.tsv'),
+              quote = FALSE,
+              sep = '\t',
+              row.names = FALSE)
+obj_alpha$data_stat %>%
+  filter(Measure %in% indices_alpha) %>%
+  write.table(file.path(output_path2, 'alpha_group_summary_result.tsv'),
+              quote = FALSE,
+              sep = '\t',
+              row.names = FALSE)
+rm(obj_alpha)
+```
+
+## Beta diversity
+```{r beta_div}
+output_path3 <- file.path(output_dir_path, "03_Beta")
+if (!dir.exists(output_path3)){
+  dir.create(output_path3)
+}
+
+microtable_obj$cal_betadiv(unifrac = TRUE)
+indices_beta <- c("bray", "jaccard", "wei_unifrac", "unwei_unifrac")
+
+for (indice in indices_beta){
+  tmp_path <- file.path(output_path3, indice)
+  if (!dir.exists(tmp_path)){
+    dir.create(tmp_path)
+  }
+  
+  obj_beta <- trans_beta$new(microtable_obj,
+                             group = group1,
+                             measure=indice)
+  # PERMANOVA + PCoA
+  obj_beta$cal_ordination(method = "PCoA")
+  write.table(data.frame(sampleid=row.names(obj_beta$res_ordination$model$vectors),
+                         obj_beta$res_ordination$model$vectors),
+              file.path(tmp_path, 'PCoA.tsv'),
+              quote = FALSE, sep = '\t', row.names = FALSE)       
+  
+  plot_beta <- obj_beta$plot_ordination(plot_color = group1,
+                                        point_size = 5,
+                                        point_alpha = .2,
+                                        plot_type = c("point", "ellipse"),
+                                        ellipse_chull_fill = FALSE)
+  plot_beta <- plot_beta +
+    theme_publication() +
+    theme(legend.direction = 'vertical')
+  if (exists("color1")){
+    plot_beta <- plot_beta + scale_color_manual(values = color1)
+  }
+  ggsave(file.path(tmp_path, 'PCoA.pdf'),
+         plot_beta,
+         width = 180,
+         height = 100,
+         units = 'mm')
+  
+  obj_beta$cal_manova(manova_all = TRUE)
+  write.table(obj_beta$res_manova,
+              file.path(tmp_path, 'PERMANOVA.tsv'),
+              quote = FALSE, sep = '\t', row.names = FALSE)
+
+  # ANOSIM + NMDS
+  obj_beta$cal_ordination(method = "NMDS")
+  write.table(data.frame(sampleid=rownames(obj_beta$res_ordination$scores),
+                                  obj_beta$res_ordination$scores),
+              file.path(tmp_path, 'NMDS.tsv'),
+              quote = FALSE, sep = '\t', row.names = FALSE)
+  plot_beta <- obj_beta$plot_ordination(plot_color = group1,
+                                        point_size = 5,
+                                        point_alpha = .2,
+                                        plot_type = c("point", "ellipse"),
+                                        ellipse_chull_fill = FALSE)
+  plot_beta <- plot_beta +
+    theme_publication() +
+    theme(legend.direction = 'vertical')
+  if (exists("color1")){
+    plot_beta <- plot_beta + scale_color_manual(values = color1)
+  }
+  ggsave(file.path(tmp_path, 'NMDS.pdf'),
+         plot_beta,
+         width = 180,
+         height = 100,
+         units = 'mm')  
+
+  obj_beta$cal_anosim()
+  write.table(obj_beta$res_anosim,
+              file.path(tmp_path, 'ANOSIM.tsv'),
+              quote = FALSE, sep = '\t', row.names = FALSE)
+}
+rm(obj_beta)
+```
+
+
+## Composition
+```{r comp_bar}
+output_path4 <- file.path(output_dir_path, "04_Composition")
+if (!dir.exists(output_path4)){
+  dir.create(output_path4)
+}
+
+for (taxa in c("Phylum", "Genus")){
+  # Individual
+  obj_comp <- trans_abund$new(dataset = microtable_obj,
+                              taxrank = taxa,
+                              ntaxa = 9)
+  plot_comp <- obj_comp$plot_bar(others_color = "grey70",
+                                 color_values = RColorBrewer::brewer.pal(9, "Paired"),
+                                 facet = group1,
+                                 xtext_keep = FALSE,
+                                 legend_text_italic = FALSE)
+  plot_comp <- plot_comp + theme(panel.background = element_blank())
+  ggsave(file.path(output_path4, paste0(taxa, '_abun.pdf')),
+         plot_comp,
+         width = 180,
+         height = 120,
+         units = 'mm')
+  obj_comp$data_abund %>%
+      pivot_wider(id_cols = Taxonomy,
+                  names_from = 'Sample',
+                  values_from = 'Abundance') %>%
+      write.table(file.path(output_path4, paste0(taxa, '_abun.tsv')),
+                  quote=FALSE, sep = '\t', row.names = FALSE)
+  
+  # Group
+  obj_comp_group <- trans_abund$new(dataset = microtable_obj,
+                                    taxrank = taxa,
+                                    ntaxa = 9,
+                                    groupmean = group1)
+  plot_comp_group <- obj_comp_group$plot_bar(others_color = "grey70",
+                                             color_values = RColorBrewer::brewer.pal(9, "Paired"),
+                                             legend_text_italic = FALSE)
+  plot_comp_group <- plot_comp + theme(panel.background = element_blank())
+  ggsave(file.path(output_path4, paste0(taxa, '_group_abun.pdf')),
+         plot_comp_group,
+         width = 180,
+         height = 120,
+         units = 'mm')
+  obj_comp_group$data_abund %>%
+      pivot_wider(id_cols = Taxonomy,
+                  names_from = 'Sample',
+                  values_from = 'Abundance') %>%
+      write.table(file.path(output_path4, paste0(taxa, '_group_abun.tsv')),
+                  quote=FALSE, sep = '\t', row.names = FALSE)
+  rm(plot_comp_group, obj_comp_group, plot_comp, obj_comp)
+}
+```
+```{r comp_core}
+# Hard cut-off reference
+# Callahan BJ, Sankaran K, Fukuyama JA, McMurdie PJ, Holmes SP. 2016. 
+# Bioconductor workflow for microbiome data analysis: from raw reads to community
+# analyses. F1000Res 5:1492. https://doi.org/10.12688/f1000research.8986.2
+
+# Core OTU for each group
+prop_sample <- 0.5 # occupancy greater than 50%
+prop_abun <- 0.0002 # 0.02% abundance greater than 0.02% across all samples
+
+# This is a rarefied table
+table_otu_core <- microtable_obj$otu_table %>%
+  mutate(OTU=rownames(.)) %>%
+  pivot_longer(names_to = 'Sample',
+               values_to = 'Abun',
+               cols=-OTU) %>%
+  left_join(
+    table_sample %>% mutate(Sample=rownames(.))
+  ) %>%
+  group_by(!!sym(group1)) %>%
+  mutate(GroupSampleNum=n_distinct(Sample)) %>%
+  ungroup()%>%
+  group_by(Sample) %>%
+  mutate(RelaAbun=Abun/sum(Abun)) %>%
+  filter(RelaAbun > prop_abun) %>%
+  ungroup() %>%
+  group_by(OTU, !!sym(group1)) %>%
+  mutate(sampleNum=n()) %>%
+  ungroup() %>%
+  filter(sampleNum >= GroupSampleNum * prop_sample) %>%
+  dplyr::select(OTU, Sample, Abun) %>%
+  pivot_wider(id_cols=OTU,
+              names_from = Sample,
+              values_from = Abun,
+              values_fill=0) %>%
+  as.data.frame() %>%
+  `rownames<-`(.$OTU) %>%
+  select(-OTU)
+  
+
+obj_core <- microtable$new(sample_table = table_sample,
+                           tax_table = table_tax,
+                           otu_table = table_otu_core,
+                           phylo_tree=tree_otu)
+
+```
+
+```{r comp_venn}
+## NOTE: merge_samples in microeco using *union* results##
+obj_venn <- trans_venn$new(obj_core$merge_samples(group1))
+
+# Venn plot
+# If group num less than 6, draw venn plot
+if (length(unique(obj_core$sample_table[[group1]])) <= 5){
+  plot_venn <- obj_venn$plot_venn(petal_color = RColorBrewer::brewer.pal(8, "Dark2"))
+  ggsave(file.path(output_path4, 'venn.pdf'),
+         plot_venn,
+         width = 120,
+         height = 120,
+         units = 'mm')
+}
+
+# Petal plot
+plot_petal <- obj_venn$plot_venn(petal_plot = TRUE,
+                                 petal_center_size = 30,
+                                 petal_r = 1.5, # scaling up the size of the ellipse.
+                                 petal_a = 3, # the length of the ellipse.
+                                 petal_move_xy = 3.8, # the distance of text to circle.
+                                 petal_color_center = "#BEBADA")
+  ggsave(file.path(output_path4, 'petal.pdf'),
+         plot_petal,
+         width = 120,
+         height = 120,
+         units = 'mm')
+
+# Intercection result
+write.table(obj_venn$data_details,
+            file.path(output_path4, 'ASV_category.tsv'),
+            quote=FALSE, sep = '\t', row.names = FALSE)
+```
+
+## Differential abundance test
+```{r diff}
+output_path5 <- file.path(output_dir_path, "05_Diff")
+if (!dir.exists(output_path5)){
+  dir.create(output_path5)
+}
+
+obj_diff <- trans_diff$new(microtable_obj,
+                           method = "lefse",
+                           group = group1,
+                           alpha = 0.05, # Significance
+                           lefse_subgroup = NULL)
+
+# From v0.8.0, threshold is used for the LDA score selection.
+# we show 20 taxa with the highest LDA (log10)
+plot_diff <- obj_diff$plot_diff_bar(threshold = 4,
+                                    use_number = 1:20,
+                                    width = 0.8)
+if (exists("color1")){
+  plot_diff <- plot_diff +
+    scale_color_manual(values = color1) +
+    scale_fill_manual(values = color1)
+}
+ggsave(file.path(output_path5, 'LEfSe.pdf'),
+       plot_diff,
+       height = 180,
+       width = 100,
+       scale = 3,
+       units = 'mm')
+
+obj_diff$res_diff[c(2, 4, 5, 7, 8)] %>%
+      write.table(file.path(output_path5, paste0(taxa, '_LEfSe.tsv')),
+                  quote=FALSE, sep = '\t', row.names = FALSE)
+rm(obj_diff, plot_diff)
+```
+
+## Network
+```{r network}
+output_path6 <- file.path(output_dir_path, "06_Network")
+if (!dir.exists(output_path6)){
+  dir.create(output_path6)
+}
+
+# More strict: OTU present in more than 50% samples
+tmp_index <- apply(table_otu_core, 1, \(x){sum(x>0)/length(x)}) > prop_sample
+asv_vec <- names(tmp_index)[tmp_index]
+
+obj_net_raw <- trans_norm$new(microtable_obj_raw)
+obj_net_clr <- obj_net_raw$norm(method='clr')
+obj_net_clr$otu_table <- obj_net_clr$otu_table[asv_vec,]
+
+obj_net <- trans_network$new(obj_net_clr,
+                             cor_method = "spearman",
+                             use_WGCNA_pearson_spearman=TRUE,
+                             nThreads=4) # the relative abundance threshold.
+rm(obj_net_raw, obj_net_clr, tmp_index, asv_vec)
+
+obj_net$cal_network(COR_p_thres = 0.01,
+                    COR_optimization_seq = 0.02,
+                    COR_optimization = TRUE)
+obj_net$cal_module(method = "cluster_fast_greedy")
+obj_net$save_network(filepath = file.path(output_path6, "network.gexf"))
+
+obj_net$cal_network_attr()
+obj_net$res_network_attr
+write.table(data.frame(Attribute=row.names(obj_net$res_network_attr),
+                       obj_net$res_network_attr),
+            file.path(output_path6, 'network_attribute.tsv'),
+            quote=FALSE, sep = '\t', row.names = FALSE)
+
+obj_net$get_node_table(node_roles = TRUE)
+write.table(obj_net$res_node_table,
+            file.path(output_path6, 'node.tsv'),
+            quote=FALSE, sep = '\t', row.names = FALSE)
+
+obj_net$get_edge_table()
+write.table(obj_net$res_edge_table,
+            file.path(output_path6, 'edge.tsv'),
+            quote=FALSE, sep = '\t', row.names = FALSE)
+
+
+plot_node1 <- obj_net$plot_taxa_roles(use_type = 1)
+ggsave(file.path(output_path6 , "key_node.pdf"),
+       plot_node1,
+       width = 150,
+       height = 100,
+       units = 'mm')
+```
+
+
